@@ -1,0 +1,193 @@
+---
+title: "Create Data Dictionary for DUA"
+author: "Jenny Smith"
+date: ""
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(TARGET,"Clinical/Analysis/2021.11.18_COG_DUA"))
+```
+
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+library(REDCapR)
+
+getwd()
+```
+
+
+
+# ClinData
+
+```{r message=FALSE}
+#https://cran.r-project.org/web/packages/REDCapR/vignettes/workflow-read.html 
+project <- "Data_Dictionary_COG_DUA"
+
+if(project==""){
+  stop("Must include Projecy name!")
+}else{
+  message(paste0("Project is: ",project))
+  current_cde_database <- paste("TARGET_AML_CDEs_For_Project",project, ".RDS", sep="_")
+  
+  if(file.exists(current_cde_database)){
+    print("Reading CDEs from Rdata object.")
+    merged <- readRDS(current_cde_database)
+      
+  }else{
+    print("Downloading CDEs from RedCap API.")
+    path_credential <- file.path(HOME,".redcap")
+    project_id <- 1295
+  
+    credential  <- REDCapR::retrieve_credential_local(
+      path_credential = path_credential,
+      project_id = project_id)
+    
+    #takes about 30 sec to download. 
+    merged <- redcap_read(redcap_uri = credential$redcap_uri, 
+                          token = credential$token, 
+                          raw_or_label_headers = 'label')
+    if(merged$success){
+      merged <- data.frame(merged$data, check.names=TRUE) #remove the white spaces  (will this even work??)
+      saveRDS(merged, current_cde_database)
+    }
+    
+    fname_c <- ifelse(length(ls(pattern = "_cts_file")) == 0,"None" ,basename(get(ls(pattern = "_cts_file"))))
+    fname_t <- ifelse(length(basename(ls(pattern = "_TPM_file"))) == 0,"None", basename(get(ls(pattern = "_TPM_file"))))
+    
+    #Create a simple log file from the day the project starts
+    cat(c(paste("Date:", Sys.Date()),
+          paste("cts:", fname_c),
+          paste("tpm:", fname_t), 
+          paste("CDE:", current_cde_database)),
+          sep = "\n", 
+          file = paste(project, Sys.Date(), ".log", sep="_"))
+    
+  }
+  
+  #keep a list of the ineligable patiens to remove if necessary
+  inelig <- merged %>% 
+    filter(Eligibility.Comments == "remove") %>% 
+    pull(USI)
+  
+  #Filter those with USIs and are eligible for the study
+  merged <- merged %>% 
+    filter(Eligibility.Comments != "remove")
+  
+  
+  dim(merged) 
+  head(merged)
+
+}
+```
+
+# Read the Current Variable Definitions 
+
+```{r}
+definitions <- openxlsx::read.xlsx(file.path(CDE, "CDE_Column_and_Risk_Descriptions.xlsx"), startRow = 3)
+
+head(definitions)
+```
+
+```{r}
+#from the TARGET Data Matrix
+dcc_definitions <- openxlsx::read.xlsx("TARGET_AML_CDE_20181213.xlsx")
+
+head(dcc_definitions)
+```
+
+```{r}
+mapping_file <- openxlsx::read.xlsx(file.path(CDE, "TARGET_AML_Colnames_Mapping_File_v7.xlsx"))
+
+head(mapping_file)
+```
+
+
+# Define the most necessary 
+
+```{r}
+current_cols <- merged %>% 
+  colnames()
+
+head(current_cols)
+grep("age", current_cols, value=TRUE, ignore.case = TRUE)
+```
+
+```{r}
+setdiff(definitions$Merged_CDEs_Colnames, current_cols) #Need to address these differences at some point and update the CDE_Column_and_Risk_Descriptions.xlsx file accordingly 
+```
+
+Notes: 
+1) can I fix the label on the merged CDEs downloads to remove special characters? 
+ex: "UBTF-ITD positive?"
+
+2) Need to update the CDE_Column_and_Risk_Descriptions.xlsx to match redcap labels
+
+```{r}
+request_cols <- mapping_file %>% 
+  left_join(., definitions, by="Merged_CDEs_Colnames") %>% 
+  select(Merged_CDEs_Colnames, AAML1031_Official_Colnames, Description) %>% 
+  filter(!is.na(AAML1031_Official_Colnames)) %>% 
+  filter(grepl("USI|Study|Age|Sex|Ethnicity|WBC|blast.+%|MRD|CR|SCT|Treatment|^OS|^EFS|^DFS|^RR|Days to|WHO",AAML1031_Official_Colnames) | 
+           grepl("ISCN|FLT3.+ [pa].+|NPM|CEBPA", AAML1031_Official_Colnames)) 
+
+
+request_cols
+```
+
+
+```{r}
+request_cols_clean <- request_cols %>% 
+  select(`Data Element`=AAML1031_Official_Colnames,Description) %>% 
+  mutate(`Alternative Element Name`="", Justification="") %>% 
+  select(1, `Alternative Element Name`, everything())
+
+
+# request_cols_clean # I will add in the justification manually - and I will augement the description manually to fit dcc_definitions due to incompatible/no matchin keys to merge on. 
+# openxlsx::write.xlsx(request_cols_clean, "Meshinchi_DUA_Clinical_Data_Elements.xlsx",rowNames = FALSE,keepNA=FALSE)
+```
+
+
+```{r}
+table(merged$RR.from.CR..end.of.course.1..indicator)
+table(merged$RR.from.end.of.INT.1.for.pts.who.continue.on.TX.at.end.of.INT.I.indicator)
+```
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+
